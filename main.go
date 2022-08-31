@@ -4,12 +4,13 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
 	"log"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
 )
 
 func fetchForEach(c *client.Client, start int, end int, fetchItems []imap.FetchItem, f func(message *imap.Message) error) error {
@@ -54,6 +55,7 @@ type Config struct {
 	sync               bool
 	move               bool
 	verbose            bool
+	nodup              bool
 }
 
 var logOut = log.New(os.Stdout, "", 0)
@@ -72,6 +74,7 @@ func main() {
 	flag.BoolVar(&c.sync, "sync", false, "continuously sync mails rather than copying once")
 	flag.BoolVar(&c.move, "move", false, "move existing messages instead of copying")
 	flag.BoolVar(&c.verbose, "verbose", false, "print debug logs to stdout")
+	flag.BoolVar(&c.nodup, "nodup", false, "check if message id already exists in downstream folder and skip if it does")
 	flag.Parse()
 	if c.downstreamFolder == "" {
 		c.downstreamFolder = c.upstreamFolder
@@ -173,9 +176,38 @@ func run(c *Config) error {
 			bodySection := &imap.BodySectionName{
 				Peek: true,
 			}
-			items := []imap.FetchItem{imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope, imap.FetchBody, bodySection.FetchItem()}
+
+			items := []imap.FetchItem{
+				imap.FetchFlags,
+				imap.FetchInternalDate,
+				imap.FetchRFC822Size,
+				imap.FetchRFC822Header,
+				imap.FetchEnvelope,
+				imap.FetchBody,
+				bodySection.FetchItem(),
+				imap.FetchUid,
+				imap.FetchBodyStructure,
+			}
 
 			err := fetchForEach(uc, lastCountLocal+1, newCountLocal, items, func(msg *imap.Message) error {
+				if c.nodup {
+
+					sc := imap.NewSearchCriteria()
+					sc.Header.Add("message-id", msg.Envelope.MessageId)
+
+					uids, err := dc.UidSearch(sc)
+
+					if err != nil {
+						return err
+					}
+
+					if len(uids) > 0 {
+						if c.verbose {
+							logOut.Printf("message %v already in downstream", int(msg.SeqNum))
+						}
+						return nil
+					}
+				}
 				if c.verbose {
 					logOut.Printf("appending message %v to downstream", int(msg.SeqNum))
 				}
