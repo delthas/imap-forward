@@ -4,12 +4,13 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
 	"log"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
 )
 
 func fetchForEach(c *client.Client, start int, end int, fetchItems []imap.FetchItem, f func(message *imap.Message) error) error {
@@ -28,9 +29,14 @@ func fetchForEach(c *client.Client, start int, end int, fetchItems []imap.FetchI
 	return <-done
 }
 
-func remove(c *client.Client, start int, end int) error {
+func remove(c *client.Client, q ...int) error {
+	if len(q) == 0 {
+		return nil
+	}
 	var set imap.SeqSet
-	set.AddRange(uint32(start), uint32(end))
+	for _, v := range q {
+		set.AddNum(uint32(v))
+	}
 	item := imap.FormatFlagsOp(imap.AddFlags, true)
 	flags := []interface{}{imap.DeletedFlag}
 	if err := c.Store(&set, item, flags, nil); err != nil {
@@ -175,12 +181,17 @@ func run(c *Config) error {
 			}
 			items := []imap.FetchItem{imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope, imap.FetchBody, bodySection.FetchItem()}
 
+			var removeIDs []int
 			err := fetchForEach(uc, lastCountLocal+1, newCountLocal, items, func(msg *imap.Message) error {
 				if c.verbose {
 					logOut.Printf("appending message %v to downstream", int(msg.SeqNum))
 				}
 				if err := dc.Append(c.downstreamFolder, msg.Flags, msg.InternalDate, msg.GetBody(bodySection)); err != nil {
-					return fmt.Errorf("appending message to downstream: %v", err)
+					logErr.Printf("appending message to downstream: %v", err)
+					return nil
+				}
+				if c.move {
+					removeIDs = append(removeIDs, int(msg.SeqNum))
 				}
 				return nil
 			})
@@ -190,10 +201,8 @@ func run(c *Config) error {
 			updateCond.L.Lock()
 			lastCount = newCountLocal
 			updateCond.L.Unlock()
-			if c.move {
-				if err := remove(uc, lastCountLocal+1, newCountLocal); err != nil {
-					return fmt.Errorf("deleting upstream messages: %v", err)
-				}
+			if err := remove(uc, removeIDs...); err != nil {
+				return fmt.Errorf("deleting upstream messages: %v", err)
 			}
 			if c.verbose {
 				logOut.Printf("processed upstream messages, upstream now has %v messages", newCountLocal)
